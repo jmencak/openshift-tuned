@@ -1,21 +1,85 @@
 #!/bin/sh
 
-cluster_node_labels=${CLUSTER_NODE_LABELS:-/var/lib/tuned/ocp-node-labels.cfg}
-cluster_pod_labels=${CLUSTER_POD_LABELS:-/var/lib/tuned/ocp-pod-labels.cfg}
+ProgramName=${0##*/}
 
-SYSTEMD_IGNORE_CHROOT=1 systemctl disable tuned --now || :
+fail() {
+  echo $@ >&2
+}
 
-# Tuned can take ~20s to reload/start when "ulimit -Sn == 1048576".
-# See:
-# - https://github.com/redhat-performance/tuned/issues/146
-# - https://www.python.org/dev/peps/pep-0446/#closing-all-open-file-descriptors
-# - http://bugs.python.org/issue1663329
-ulimit -Sn 1024	# workaround for the issue above
+info() {
+  echo "$ProgramName: $@"
+}
 
-openshift-tuned \
-           -v=1 \
-           -node-labels $cluster_node_labels \
-           -pod-labels $cluster_pod_labels \
-           -watch-file /etc/tuned/recommend.d/ \
-           -watch-file /var/lib/tuned/profiles-data/ \
-           ${OCP_NODE_NAME}
+warn() {
+  fail "$ProgramName: $@"
+}
+
+die() {
+  local err=$1
+  shift
+  fail "$ProgramName: $@"
+  exit $err
+}
+
+get_os_major_version() {
+  local os_release_file=${1:-/etc/os-release}
+  local os_major_version
+
+  . $os_release_file
+
+  case "$ID" in
+    rhel|fedora) os_major_version=$(echo -n $VERSION_ID | cut -d. -f1)
+    ;;
+    rhcos) os_major_version=$(echo -n $VERSION | cut -d. -f2)
+    ;;
+    *) die 1 "unknown OS ID: $ID"
+    ;;
+  esac
+
+  echo -n "$os_major_version"
+}
+
+get_os_host_major_version() {
+  get_os_major_version /host/etc/os-release
+}
+
+get_os_container_major_version() {
+  get_os_major_version
+}
+
+run_openshift_tuned() {
+  local cluster_node_labels=${CLUSTER_NODE_LABELS:-/var/lib/tuned/ocp-node-labels.cfg}
+  local cluster_pod_labels=${CLUSTER_POD_LABELS:-/var/lib/tuned/ocp-pod-labels.cfg}
+
+  SYSTEMD_IGNORE_CHROOT=1 systemctl disable tuned --now || :
+
+  # Tuned can take ~20s to reload/start when "ulimit -Sn == 1048576".
+  # See:
+  # - https://github.com/redhat-performance/tuned/issues/146
+  # - https://www.python.org/dev/peps/pep-0446/#closing-all-open-file-descriptors
+  # - http://bugs.python.org/issue1663329
+  ulimit -Sn 1024	# workaround for the issue above
+
+  openshift-tuned \
+    -v=1 \
+    -node-labels $cluster_node_labels \
+    -pod-labels $cluster_pod_labels \
+    -watch-file /etc/tuned/recommend.d/ \
+    -watch-file /var/lib/tuned/profiles-data/ \
+    ${OCP_NODE_NAME}
+}
+
+main() {
+  local os_host_major_version=$(get_os_host_major_version)
+  local os_container_major_version=$(get_os_container_major_version)
+
+  if test "$os_host_major_version" = "$os_container_major_version" ; then
+    info "starting openshift-tuned"
+    run_openshift_tuned
+  else
+    info "major version of the host OS ($os_host_major_version) != major version container OS ($os_container_major_version): sleep inf"
+    sleep inf
+  fi
+}
+
+main
